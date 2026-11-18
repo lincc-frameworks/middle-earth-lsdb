@@ -1,0 +1,50 @@
+# The LSDB websites: data.lsdb.io and lsdb.io.
+#
+#   podman compose up -d --build
+#
+# Apache serves both websites (built into the image) and, on data.lsdb.io,
+# the HATS catalogs under /hats/ (bind-mounted read-only from network
+# storage), in one container on port 8080. The VM's reverse proxy handles TLS termination and
+# routes traffic here. A second container, `monitoring`, reports the VM's
+# CPU, memory and disks on port 9110 for the gadget monitor.
+#
+# SVC_USER, SVC_UID, SVC_GID, SVC_FQDN and HATS_DIR must be set in .env
+# (written by init.sh; the account comes from IT's /root/VM.set). There are no
+# defaults; missing values will cause podman compose to fail.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SVC_UID: "${SVC_UID}"
+        SVC_GID: "${SVC_GID}"
+        SVC_USER: "${SVC_USER}"
+    image: middle-earth-lsdb/app:latest
+    container_name: lsdb-app
+    hostname: "${SVC_FQDN}"
+    environment:
+      SERVER_NAME: "${SVC_FQDN}"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # The HATS catalogs, served as /hats/. Read-only: the web server never
+      # writes to them. No :z -- the source is NFS, which can't be relabeled.
+      - "${HATS_DIR}:/srv/hats:ro"
+    restart: unless-stopped
+    user: "${SVC_UID}:${SVC_GID}"
+    labels:
+      idac.service: lsdb-app
+
+  # CPU, memory and disks of this VM, for the gadget monitor (monitoring/README.md).
+  # Copied unchanged from middle-earth-gadget-monitor; its settings live in
+  # monitoring/compose.yaml. Serves http://<vm fqdn>:9110/metrics.
+  monitoring:
+    extends:
+      file: monitoring/compose.yaml
+      service: monitoring
+    build: monitoring
+    container_name: lsdb-service-vm
+    labels:
+      idac.service: lsdb-service-vm
