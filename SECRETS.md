@@ -13,14 +13,15 @@ No secret is ever committed to this repo or baked into a container image.
   certificate or key. (On the legacy host, epyc, Apache held the
   data.lsdb.io certificate itself; that does not carry over.)
 
-The one thing mounted from `/service/shire` is the catalog data (`HATS_DIR`
-in `.env`), read-only. It is not secret, but the ownership rules below apply
+The one thing mounted into the container from shire is the catalog data
+(`/service/hats-catalogs`, `HATS_DIR` in `.env`), read-only. It is not secret, but the ownership rules below apply
 to it just the same.
 
 ## Ownership and root_squash
 
-`/service/shire` is exported with `root_squash`, so **root on the VM cannot
-write to it** and reads it as `nobody`. The container runs as the service
+The shire mounts (`/service/shire`, `/service/hats-catalogs`) are exported
+with `root_squash`, so **root on the VM cannot write to them** and reads
+them as `nobody`. The container runs as the service
 account named in IT's `/root/VM.set` (`VMUSER`, `VMUID`, `VMGID`), which
 `init.sh` also writes to the repo's `.env` as `SVC_USER`, `SVC_UID`, `SVC_GID`.
 That account must be able to read the catalogs: directories need `r-x` and
@@ -55,5 +56,5 @@ volumes:
 /service/shire/secrets/<secret-file>   0600  $SVC_USER
 ```
 
-Keep it out of `HATS_DIR`: everything under that directory is served to the
-public.
+`/service/shire` is the service's own area and is not served. Never put a
+secret under `HATS_DIR`: everything there is served to the public.
