@@ -57,7 +57,7 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
   VM reverse  ──►  │  app container: apache (port 8080)        │
   proxy :8080      │    Host: data.lsdb.io                     │
                    │      /        → website (in the image)    │
-                   │      /hats/*  → /srv/hats (read-only) ────┼──► /service/shire
+                   │      /hats/*  → /srv/hats (read-only) ────┼──► /service/hats-catalogs
                    │    Host: lsdb.io                          │     (NFS, on the VM)
                    │      /        → website (in the image)    │
                    └──────────────────────────────────────────┘
@@ -107,14 +107,15 @@ compete for ports 8080 and 9110.
 
 `https://data.lsdb.io/hats/<name>/...` is what LSDB clients read, and the
 largest part of what this service serves. The data is not in the image or the
-repo. It lives on the shire storage server, which IT mounts on the VM at
-`/service/shire`; `init.sh` names the directory inside it (`HATS_DIR`, at the
-top of the script) and `compose.yaml` bind-mounts that read-only at
-`/srv/hats`.
+repo. It lives on the shire storage server, in `hats/catalogs`
+(`/astro/store/shire/hats/catalogs` as seen from arnor), which IT mounts on
+the VM at `/service/hats-catalogs`. `init.sh` names that mount point
+(`HATS_DIR`, at the top of the script) and `compose.yaml` bind-mounts it
+read-only at `/srv/hats`.
 
-- **Adding a catalog** means putting it in `HATS_DIR` as the service account
-  (see `SECRETS.md` for why root can't). It is served at once; nothing is
-  restarted. To give it a description in the listing, add an `AddDescription`
+- **Adding a catalog** means putting it in `hats/catalogs` on shire (from
+  arnor, for example), readable by the service account (see `SECRETS.md`).
+  It is served at once; nothing is restarted. To give it a description in the listing, add an `AddDescription`
   line to `apache/httpd.conf` and rebuild.
 - **Entries should be real directories, or symlinks that stay inside
   `HATS_DIR`.** The container sees only that directory, so a symlink to
@@ -192,7 +193,7 @@ SVC_USER=astro-myservice
 SVC_UID=NNNNNNN
 SVC_GID=NNNNNNNNNN
 SVC_FQDN=myservice.astro.washington.edu
-HATS_DIR=/service/shire/hats
+HATS_DIR=/service/hats-catalogs
 ```
 
 The Dockerfile and compose.yaml consume these values with no hardcoded
@@ -227,7 +228,7 @@ The procedure above is the whole deployment. On a new VM, confirm:
 - `/root/VM.set` exists and names a service account that exists on the VM
   (IT provisions both).
 - The VM has network access to Docker Hub, GitHub and the npm registry.
-- `/service/shire` is mounted and `HATS_DIR` holds the catalogs, readable by
+- `/service/hats-catalogs` is mounted and holds the catalogs, readable by
   the service account. `init.sh` warns if not; the app container will not
   start if the directory does not exist.
 - For production: the VM is listed in the gadget monitor's

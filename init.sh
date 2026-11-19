@@ -18,10 +18,11 @@ ENV_FILE="$REPO_DIR/.env"
 # Written by IT when the VM is provisioned and authoritative for the service
 # account. tcsh syntax: `set VMUSER=astro-myservice`.
 VM_SET=/root/VM.set
-# Where the HATS catalogs live on this VM: a directory on the shire NFS mount
-# whose entries are the catalogs, served as https://data.lsdb.io/hats/<entry>/.
+# Where the HATS catalogs live on this VM: IT's NFS mount of the catalog
+# directory on the shire storage server (hats/catalogs there). Its entries
+# are the catalogs, served as https://data.lsdb.io/hats/<entry>/.
 # compose.yaml bind-mounts it read-only into the container.
-HATS_DIR=/service/shire/hats
+HATS_DIR=/service/hats-catalogs
 
 WARNINGS=0
 warn() { echo "WARNING: $*" >&2; WARNINGS=$((WARNINGS + 1)); }
@@ -95,7 +96,7 @@ echo "== Catalog storage =="
 as_svc() { setpriv --reuid="$SVC_UID" --regid="$SVC_GID" --clear-groups "$@"; }
 if ! as_svc test -d "$HATS_DIR"; then
     warn "$HATS_DIR does not exist or $SVC_USER cannot see it. The app container
-         will not start without it. Is /service/shire mounted (findmnt /service/shire)?"
+         will not start without it. Is it mounted (findmnt $HATS_DIR)?"
 elif ! as_svc test -r "$HATS_DIR" || ! as_svc test -x "$HATS_DIR"; then
     warn "$SVC_USER cannot read $HATS_DIR; /hats/ would answer 403"
 elif [ -z "$(as_svc ls -A "$HATS_DIR" 2>/dev/null | head -n 1)" ]; then
