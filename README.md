@@ -6,13 +6,13 @@ following
 
 One Apache container serves:
 
-- **[data.lsdb.io](https://data.lsdb.io)**: the catalog browser, built from a
-  pinned commit of
+- **[data.lsdb.io](https://data.lsdb.io)**: the catalog browser, built from the
+  `production` branch of
   [astronomy-commons/data.lsdb.io](https://github.com/astronomy-commons/data.lsdb.io),
   and the HATS catalogs at `/hats/`, bind-mounted read-only from the shire
   storage server;
-- **[lsdb.io](https://lsdb.io)**: the project's landing page, from a pinned
-  commit of
+- **[lsdb.io](https://lsdb.io)**: the project's landing page, from the
+  `production` branch of
   [astronomy-commons/lsdb.io](https://github.com/astronomy-commons/lsdb.io).
 
 A second container reports the VM's CPU, memory and disks to the DiRAC gadget

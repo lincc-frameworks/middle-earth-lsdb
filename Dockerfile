@@ -4,38 +4,51 @@
 #                  catalogs under /hats/
 #   lsdb.io        the project's landing page (plain files, no build)
 #
-# Stage 1 fetches both sites at pinned commits and builds data.lsdb.io.
+# Stage 1 fetches each site's `production` branch and builds data.lsdb.io.
 # Stage 2 is Apache with the results. The HATS catalogs are not in the image;
 # compose.yaml bind-mounts them read-only at /srv/hats.
 
 # ── Stage 1: fetch and build the sites ──────────────────────────────────────
 FROM docker.io/library/node:22-bookworm-slim AS sites
 
-# The commits to deploy. To release a new version of a site, change its
-# commit here and rebuild (DEPLOY.md, "Updating the websites").
+# What to deploy: the `production` branch of each site's repo. Every build
+# downloads the branch as it is at that moment, so releasing a site is merging
+# its `main` into `production` and rebuilding on the VM (DEPLOY.md, "Updating
+# the websites"). A tag or a full commit id also works here, to hold a site at
+# one version.
 #   https://github.com/astronomy-commons/data.lsdb.io
-ARG DATA_SITE_REF=c37fbd895b601d323357c61e6f2e5040b2dffc20
+ARG DATA_SITE_REF=production
 #   https://github.com/astronomy-commons/lsdb.io
-ARG MAIN_SITE_REF=7c7c97c421a4e820469437c3c619f18f07da1929
+ARG MAIN_SITE_REF=production
+
+# The commit a downloaded archive was made from: GitHub records it in the
+# archive's header. Written to each site's /VERSION, since a branch name says
+# nothing about what is actually deployed.
+RUN printf '%s\n' '#!/bin/sh' \
+        'id=$(gzip -dc "$1" | head -c 1024 | grep -a -o -E "[0-9a-f]{40}" | head -n 1)' \
+        '[ -n "$id" ] || { echo "no commit id in $1" >&2; exit 1; }' \
+        'echo "$id"' > /usr/local/bin/archive-commit && \
+    chmod +x /usr/local/bin/archive-commit
 
 # lsdb.io: served as it is in the repo, minus the files that aren't the site.
 WORKDIR /out/lsdb.io
 ADD https://github.com/astronomy-commons/lsdb.io/archive/${MAIN_SITE_REF}.tar.gz /tmp/main.tar.gz
-RUN tar -xzf /tmp/main.tar.gz --strip-components=1 && rm /tmp/main.tar.gz && \
+RUN tar -xzf /tmp/main.tar.gz --strip-components=1 && \
     rm -rf README README.md .gitignore .github CNAME && \
-    echo "${MAIN_SITE_REF}" > VERSION
+    archive-commit /tmp/main.tar.gz > VERSION && rm /tmp/main.tar.gz
 
 # data.lsdb.io: webpack build + prerendered pages, into dist/.
 WORKDIR /build
 ADD https://github.com/astronomy-commons/data.lsdb.io/archive/${DATA_SITE_REF}.tar.gz /tmp/data.tar.gz
-RUN tar -xzf /tmp/data.tar.gz --strip-components=1 && rm /tmp/data.tar.gz
+RUN tar -xzf /tmp/data.tar.gz --strip-components=1 && \
+    archive-commit /tmp/data.tar.gz > /tmp/data.version && rm /tmp/data.tar.gz
 # HUSKY=0: the git hooks are for developers; there is no .git here.
 RUN HUSKY=0 npm ci
 RUN npm run build && \
     # The legacy host read this for its 404 fallback; that now lives in
     # apache/httpd.conf, where .htaccess files are not read at all.
     rm -f dist/.htaccess && \
-    echo "${DATA_SITE_REF}" > dist/VERSION && \
+    mv /tmp/data.version dist/VERSION && \
     mv dist /out/data.lsdb.io
 
 # ── Stage 2: serve them ─────────────────────────────────────────────────────
