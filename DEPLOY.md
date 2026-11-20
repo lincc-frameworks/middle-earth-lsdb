@@ -18,10 +18,10 @@ Then verify:
 
 ```bash
 curl -s http://localhost:8080/VERSION
-# the commit of data.lsdb.io that is deployed (DATA_SITE_REF in the Dockerfile)
+# the commit of data.lsdb.io that is deployed
 
 curl -s -H 'Host: lsdb.io' http://localhost:8080/VERSION
-# the commit of lsdb.io that is deployed (MAIN_SITE_REF); a different value
+# the commit of lsdb.io that is deployed; a different value
 # from the line above shows Apache is telling the two sites apart
 
 curl -s http://localhost:8080/ | grep -o '<title>.*</title>'
@@ -43,7 +43,7 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
 |---|---|
 | `/root/VM.set` (not in the repo) | Written by IT when the VM is provisioned. The source of truth for the service account name, uid, and gid. |
 | `init.sh` | Host-level only: reads the service account from `/root/VM.set` and checks it exists on the VM, installs podman + podman-compose, enables `podman-restart.service`, checks the catalog storage is mounted and readable, writes `.env`. Idempotent; safe to re-run. |
-| `Dockerfile` | Two stages. The first downloads pinned commits of [astronomy-commons/data.lsdb.io](https://github.com/astronomy-commons/data.lsdb.io) and [astronomy-commons/lsdb.io](https://github.com/astronomy-commons/lsdb.io), and builds the former with Node (`npm ci && npm run build`); the latter is plain files. The second is Apache httpd 2.4 with the results in `/srv/data.lsdb.io` and `/srv/lsdb.io`. |
+| `Dockerfile` | Two stages. The first downloads the `production` branch of [astronomy-commons/data.lsdb.io](https://github.com/astronomy-commons/data.lsdb.io) and [astronomy-commons/lsdb.io](https://github.com/astronomy-commons/lsdb.io), and builds the former with Node (`npm ci && npm run build`); the latter is plain files. The second is Apache httpd 2.4 with the results in `/srv/data.lsdb.io` and `/srv/lsdb.io`. |
 | `compose.yaml` | Two services: `app` (Apache on port 8080, with the catalogs bind-mounted read-only) and `monitoring` (the VM's CPU, memory and disks on port 9110). |
 | `apache/httpd.conf` | Two Apache virtual hosts on plain HTTP port 8080, chosen by `Host` header. `data.lsdb.io` (the default): the website, and the catalogs from `/srv/hats` as `/hats/` with directory listings. `lsdb.io`: the landing page. |
 | `monitoring/` | Service VM monitor, copied unchanged from [middle-earth-gadget-monitor](https://github.com/dirac-institute/middle-earth-gadget-monitor). Its image and compose settings (`monitoring/compose.yaml`, pulled into `compose.yaml` with `extends`). See `monitoring/README.md`. |
@@ -72,23 +72,48 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
 
 ## Updating the websites
 
-The sites' source is not in this repo. The image takes each from one pinned
-commit, named in the `Dockerfile`:
+The sites' source is not in this repo. Every build downloads the current tip
+of the `production` branch of each site's repo, named in the `Dockerfile`:
 
-| Site | Source | Pinned by |
+| Site | Source | Branch set by |
 |---|---|---|
-| data.lsdb.io | `astronomy-commons/data.lsdb.io` | `DATA_SITE_REF` |
-| lsdb.io | `astronomy-commons/lsdb.io` | `MAIN_SITE_REF` |
+| data.lsdb.io | `astronomy-commons/data.lsdb.io`, `production` | `DATA_SITE_REF` |
+| lsdb.io | `astronomy-commons/lsdb.io`, `production` | `MAIN_SITE_REF` |
 
-After a change is merged in a site's repo:
+Development happens on each site's `main`; `production` is what is live. So
+releasing a change to a site needs no commit here:
 
-1. Set its ref in the `Dockerfile` to the new commit and commit that here.
-2. On the VM: `git pull && podman compose up -d --build`.
-3. `/VERSION` on that site should print the new commit (see the checks at
-   the top).
+1. In the site's repo, merge `main` into `production` (a pull request from
+   `main` to `production`).
+2. On the VM:
+
+   ```bash
+   cd /root/middle-earth-lsdb
+   podman compose up -d --build
+   ```
+
+Then check `/VERSION` on that site (the checks at the top): it prints the
+commit that was built, which should be the tip of the branch. A site whose
+branch has not moved is not rebuilt. If `/VERSION` still shows the old commit,
+the build reused a cached download; force a fresh one:
+
+```bash
+podman compose build --no-cache app && podman compose up -d
+```
 
 For data.lsdb.io this replaces the legacy `npm run build` + `rsync` to epyc +
-`scripts/post-deploy.sh`. To go back, set the ref back and rebuild.
+`scripts/post-deploy.sh`.
+
+**Merging to `production` does not deploy by itself.** Nothing changes on the
+VM until someone rebuilds there. And any rebuild, for whatever reason, picks
+up whatever is on the `production` branches at that moment, so merge there
+only what is ready to go live.
+
+**To go back to an earlier version**, revert the change on the site's
+`production` branch and rebuild. To hold a site at one version meanwhile, set its `*_SITE_REF` in the
+`Dockerfile` to a tag or a full commit id; set it back to the branch
+afterwards. This repo no longer records what is deployed: `/VERSION` on the
+running site is the only place that says.
 
 ## Two sites, one container
 
@@ -132,7 +157,8 @@ reverse-proxy to and no `start.sh`.
 
 **The sites are built inside the image.** Nobody builds on a laptop and copies
 files to the server. What is deployed is exactly one commit of each site,
-recorded in the repo and visible at `/VERSION`.
+the tip of its `production` branch when the image was built, visible at
+`/VERSION`.
 
 **Containers for everything.** The only things `init.sh` does on the host are
 check the service account, install podman, and check the storage mount. The
