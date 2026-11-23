@@ -28,7 +28,7 @@ curl -s http://localhost:8080/ | grep -o '<title>.*</title>'
 # <title>LSDB</title>
 
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/hats/
-# 200 (a directory listing of the catalogs)
+# 200 (a directory listing of the published catalogs)
 
 curl -s http://localhost:9110/metrics | grep -E 'load1 |filesystem_size|source_success'
 # service_vm_load1 ..., one filesystem_size line per local disk filesystem,
@@ -45,9 +45,10 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
 | `init.sh` | Host-level only: reads the service account from `/root/VM.set` and checks it exists on the VM, installs podman + podman-compose, enables `podman-restart.service`, checks the catalog storage is mounted and readable, writes `.env`. Idempotent; safe to re-run. |
 | `Dockerfile` | Two stages. The first downloads the `production` branch of [astronomy-commons/data.lsdb.io](https://github.com/astronomy-commons/data.lsdb.io) and [astronomy-commons/lsdb.io](https://github.com/astronomy-commons/lsdb.io), and builds the former with Node (`npm ci && npm run build`); the latter is plain files. The second is Apache httpd 2.4 with the results in `/srv/data.lsdb.io` and `/srv/lsdb.io`. |
 | `compose.yaml` | Two services: `app` (Apache on port 8080, with the catalogs bind-mounted read-only) and `monitoring` (the VM's CPU, memory and disks on port 9110). |
-| `apache/httpd.conf` | Two Apache virtual hosts on plain HTTP port 8080, chosen by `Host` header. `data.lsdb.io` (the default): the website, and the catalogs from `/srv/hats` as `/hats/` with directory listings. `lsdb.io`: the landing page. |
+| `apache/httpd.conf` | Two Apache virtual hosts on plain HTTP port 8080, chosen by `Host` header. `data.lsdb.io` (the default): the website, and the public catalogs from `/srv/hats/published` as `/hats/` with directory listings. `lsdb.io`: the landing page. |
 | `monitoring/` | Service VM monitor, copied unchanged from [middle-earth-gadget-monitor](https://github.com/dirac-institute/middle-earth-gadget-monitor). Its image and compose settings (`monitoring/compose.yaml`, pulled into `compose.yaml` with `extends`). See `monitoring/README.md`. |
 | `dev-startup.sh` | Local development helper for macOS: runs `docker compose` as your own uid/gid with an empty local catalog directory, since a laptop has neither `VM.set` nor the storage. |
+| `scripts/publish_catalogs.sh` | Run on a machine that mounts shire, not on the VM: creates `hats/catalogs/published/`, the directory of links that decides which catalogs are public. |
 | `SECRETS.md` | Why the service has no secrets, the NFS ownership model, and what to do if it ever gets one. |
 
 ## Architecture
@@ -57,7 +58,7 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
   VM reverse  ──►  │  app container: apache (port 8080)        │
   proxy :8080      │    Host: data.lsdb.io                     │
                    │      /        → website (in the image)    │
-                   │      /hats/*  → /srv/hats (read-only) ────┼──► /service/hats-catalogs
+                   │      /hats/*  → /srv/hats/published ──────┼──► /service/hats-catalogs
                    │    Host: lsdb.io                          │     (NFS, on the VM)
                    │      /        → website (in the image)    │
                    └──────────────────────────────────────────┘
@@ -133,21 +134,59 @@ compete for ports 8080 and 9110.
 `https://data.lsdb.io/hats/<name>/...` is what LSDB clients read, and the
 largest part of what this service serves. The data is not in the image or the
 repo. It lives on the shire storage server, in `hats/catalogs`
-(`/astro/store/shire/hats/catalogs` as seen from arnor), which IT mounts on
-the VM at `/service/hats-catalogs`. `init.sh` names that mount point
+(`/astro/store/shire/hats/catalogs` as seen from arnor or epyc), which IT
+mounts on the VM at `/service/hats-catalogs`. `init.sh` names that mount point
 (`HATS_DIR`, at the top of the script) and `compose.yaml` bind-mounts it
 read-only at `/srv/hats`.
 
-- **Adding a catalog** means putting it in `hats/catalogs` on shire (from
-  arnor, for example), readable by the service account (see `SECRETS.md`).
-  It is served at once; nothing is restarted. To give it a description in the listing, add an `AddDescription`
-  line to `apache/httpd.conf` and rebuild.
-- **Entries should be real directories, or symlinks that stay inside
-  `HATS_DIR`.** The container sees only that directory, so a symlink to
-  anywhere else (as on the legacy host, where they pointed into
-  `/epyc/data3`) is dangling inside it.
+**Only `hats/catalogs/published/` is served.** That directory holds nothing
+but symlinks, one per public catalog, pointing at the catalogs beside it:
+
+```
+hats/catalogs/
+├── published/                 <- served as https://data.lsdb.io/hats/
+│   ├── delve -> ../delve
+│   ├── erosita -> ../erosita_dr1_erass1       (public name differs)
+│   ├── dp1 -> ../dp1/public_parquet           (part of a catalog)
+│   └── ...
+├── delve/
+├── erosita_dr1_erass1/
+├── dp1/                       <- the rest of this is not public
+└── gaia_dr2/                  <- no link, so no URL
+```
+
+A catalog is public if and only if it has a link in `published/`, and the
+link's name is its public name. `scripts/publish_catalogs.sh` creates the
+links from the list at its top; run it on a machine that mounts shire (not
+the VM).
+
+- **Publishing a catalog:** put it in `hats/catalogs`, add a line to the list
+  in `scripts/publish_catalogs.sh`, and run it. It is served at once; nothing
+  is restarted. To give it a description in the listing, add an
+  `AddDescription` line to `apache/httpd.conf` and rebuild.
+- **Unpublishing:** remove its link from `published/`.
+- **Links must be relative and stay inside `hats/catalogs`.** The VM mounts
+  only that directory, so a link to anywhere else is dangling there (on the
+  legacy host they pointed into `/epyc/data3`).
+- **The catalog must be readable by everyone.** The web server runs as the
+  VM's service account, which is neither the owner nor in the group of these
+  files. A catalog that is not world-readable answers 403.
 - **`.htaccess` files are not read** (`AllowOverride None`). All Apache
   configuration is in `apache/httpd.conf`.
+
+**What this does and does not protect.** The web server only maps URLs into
+`published/`, so a catalog with no link there cannot be requested, whatever
+else is in the directory. But the links are the whole access list, so:
+
+- Whoever can write to `published/` decides what the world can download. The
+  script creates it writable by its owner only; keep it that way.
+- A symlink *inside* a published catalog is followed too. Publishing a
+  directory publishes everything reachable from it.
+- The web server can still read every world-readable file in the mount. For
+  data that must not get out (Rubin data-rights releases, for example), do
+  not rely on the missing link alone: make it not world-readable (or keep
+  it outside `hats/catalogs`), so that a mistaken link answers 403 instead
+  of serving it.
 
 ## Design choices
 
@@ -254,9 +293,10 @@ The procedure above is the whole deployment. On a new VM, confirm:
 - `/root/VM.set` exists and names a service account that exists on the VM
   (IT provisions both).
 - The VM has network access to Docker Hub, GitHub and the npm registry.
-- `/service/hats-catalogs` is mounted and holds the catalogs, readable by
-  the service account. `init.sh` warns if not; the app container will not
-  start if the directory does not exist.
+- `/service/hats-catalogs` is mounted, readable by the service account, and
+  has a `published/` directory of links to the public catalogs. `init.sh`
+  warns if not; the app container will not start if the mount point does
+  not exist.
 - For production: the VM is listed in the gadget monitor's
   `config/service_vms.toml` (see "Monitoring").
 

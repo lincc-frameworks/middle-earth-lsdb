@@ -29,8 +29,10 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      # The HATS catalogs, served as /hats/. Read-only: the web server never
-      # writes to them. No :z -- the source is NFS, which can't be relabeled.
+      # The HATS catalog directory. Apache serves only its published/
+      # subdirectory, as /hats/; the rest is mounted because the links in
+      # published/ point into it. Read-only: the web server never writes
+      # here. No :z -- the source is NFS, which can't be relabeled.
       - "${HATS_DIR}:/srv/hats:ro"
     restart: unless-stopped
     user: "${SVC_UID}:${SVC_GID}"

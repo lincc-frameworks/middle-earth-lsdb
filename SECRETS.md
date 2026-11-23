@@ -7,8 +7,9 @@ No secret is ever committed to this repo or baked into a container image.
 - Both websites are static files from public repos
   ([astronomy-commons/data.lsdb.io](https://github.com/astronomy-commons/data.lsdb.io)
   and [astronomy-commons/lsdb.io](https://github.com/astronomy-commons/lsdb.io)).
-- The HATS catalogs under `/hats/` are public data, served without
-  authentication.
+- The HATS catalogs served under `/hats/` are public data, served without
+  authentication. Only the catalogs linked from `hats/catalogs/published/`
+  are served (`DEPLOY.md`, "The catalogs").
 - TLS is terminated by the VM's reverse proxy, so the container holds no
   certificate or key. (On the legacy host, epyc, Apache held the
   data.lsdb.io certificate itself; that does not carry over.)
@@ -57,4 +58,5 @@ volumes:
 ```
 
 `/service/shire` is the service's own area and is not served. Never put a
-secret under `HATS_DIR`: everything there is served to the public.
+secret under `HATS_DIR`: the web server can read everything there that is
+world-readable, and serves whatever `published/` links to.

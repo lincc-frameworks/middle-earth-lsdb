@@ -19,9 +19,10 @@ ENV_FILE="$REPO_DIR/.env"
 # account. tcsh syntax: `set VMUSER=astro-myservice`.
 VM_SET=/root/VM.set
 # Where the HATS catalogs live on this VM: IT's NFS mount of the catalog
-# directory on the shire storage server (hats/catalogs there). Its entries
-# are the catalogs, served as https://data.lsdb.io/hats/<entry>/.
-# compose.yaml bind-mounts it read-only into the container.
+# directory on the shire storage server (hats/catalogs there). compose.yaml
+# bind-mounts it read-only into the container. Only its published/
+# subdirectory is served: one symlink per public catalog, as
+# https://data.lsdb.io/hats/<link name>/ (scripts/publish_catalogs.sh).
 HATS_DIR=/service/hats-catalogs
 
 WARNINGS=0
@@ -99,10 +100,15 @@ if ! as_svc test -d "$HATS_DIR"; then
          will not start without it. Is it mounted (findmnt $HATS_DIR)?"
 elif ! as_svc test -r "$HATS_DIR" || ! as_svc test -x "$HATS_DIR"; then
     warn "$SVC_USER cannot read $HATS_DIR; /hats/ would answer 403"
-elif [ -z "$(as_svc ls -A "$HATS_DIR" 2>/dev/null | head -n 1)" ]; then
-    warn "$HATS_DIR is empty; /hats/ will list no catalogs"
+elif ! as_svc test -d "$HATS_DIR/published"; then
+    warn "$HATS_DIR/published does not exist, so /hats/ will answer 404. It is the
+         list of public catalogs; create it with scripts/publish_catalogs.sh
+         (on a machine that mounts shire, not here)."
+elif [ -z "$(as_svc ls -A "$HATS_DIR/published" 2>/dev/null | head -n 1)" ]; then
+    warn "$HATS_DIR/published is empty; /hats/ will list no catalogs"
 else
     echo "  ok   $HATS_DIR is readable by $SVC_USER"
+    echo "  ok   $(as_svc ls -A "$HATS_DIR/published" | wc -l | tr -d ' ') catalogs published in $HATS_DIR/published"
 fi
 
 # ── Compose environment ────────────────────────────────────────────────────
