@@ -4,3 +4,6 @@ secrets/
 
 # Local stand-in for the catalog storage, made by dev-startup.sh.
 dev-hats/
+
+# One-off migration scripts (the epyc -> shire catalog copy); kept locally only.
+scripts/

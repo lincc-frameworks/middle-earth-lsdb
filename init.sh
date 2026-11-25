@@ -22,7 +22,7 @@ VM_SET=/root/VM.set
 # directory on the shire storage server (hats/catalogs there). compose.yaml
 # bind-mounts it read-only into the container. Only its published/
 # subdirectory is served: one symlink per public catalog, as
-# https://data.lsdb.io/hats/<link name>/ (scripts/publish_catalogs.sh).
+# https://data.lsdb.io/hats/<link name>/.
 HATS_DIR=/service/hats-catalogs
 
 WARNINGS=0
@@ -102,8 +102,8 @@ elif ! as_svc test -r "$HATS_DIR" || ! as_svc test -x "$HATS_DIR"; then
     warn "$SVC_USER cannot read $HATS_DIR; /hats/ would answer 403"
 elif ! as_svc test -d "$HATS_DIR/published"; then
     warn "$HATS_DIR/published does not exist, so /hats/ will answer 404. It is the
-         list of public catalogs; create it with scripts/publish_catalogs.sh
-         (on a machine that mounts shire, not here)."
+         list of public catalogs: a directory of relative symlinks, made on a
+         machine that mounts shire, not here (see DEPLOY.md)."
 elif [ -z "$(as_svc ls -A "$HATS_DIR/published" 2>/dev/null | head -n 1)" ]; then
     warn "$HATS_DIR/published is empty; /hats/ will list no catalogs"
 else

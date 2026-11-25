@@ -48,7 +48,6 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
 | `apache/httpd.conf` | Two Apache virtual hosts on plain HTTP port 8080, chosen by `Host` header. `data.lsdb.io` (the default): the website, and the public catalogs from `/srv/hats/published` as `/hats/` with directory listings. `lsdb.io`: the landing page. |
 | `monitoring/` | Service VM monitor, copied unchanged from [middle-earth-gadget-monitor](https://github.com/dirac-institute/middle-earth-gadget-monitor). Its image and compose settings (`monitoring/compose.yaml`, pulled into `compose.yaml` with `extends`). See `monitoring/README.md`. |
 | `dev-startup.sh` | Local development helper for macOS: runs `docker compose` as your own uid/gid with an empty local catalog directory, since a laptop has neither `VM.set` nor the storage. |
-| `scripts/publish_catalogs.sh` | Run on a machine that mounts shire, not on the VM: creates `hats/catalogs/published/`, the directory of links that decides which catalogs are public. |
 | `SECRETS.md` | Why the service has no secrets, the NFS ownership model, and what to do if it ever gets one. |
 
 ## Architecture
@@ -86,19 +85,22 @@ releasing a change to a site needs no commit here:
 
 1. In the site's repo, merge `main` into `production` (a pull request from
    `main` to `production`).
-2. On the VM:
+2. On the VM, redeploy (see "Redeploying" below):
 
    ```bash
    cd /root/middle-earth-lsdb
+   podman compose down
    podman compose up -d --build
    ```
 
 Then check `/VERSION` on that site (the checks at the top): it prints the
 commit that was built, which should be the tip of the branch. A site whose
-branch has not moved is not rebuilt. If `/VERSION` still shows the old commit,
-the build reused a cached download; force a fresh one:
+branch has not moved is not rebuilt. If `/VERSION` still shows the old commit
+after a `down` and `up`, the build reused a cached download; force a fresh
+one:
 
 ```bash
+podman compose down
 podman compose build --no-cache app && podman compose up -d
 ```
 
@@ -116,6 +118,33 @@ only what is ready to go live.
 afterwards. This repo no longer records what is deployed: `/VERSION` on the
 running site is the only place that says.
 
+## Redeploying
+
+After the first deployment, every change goes out the same way, whether it
+is a change to this repo or a new version of a site:
+
+```bash
+cd /root/middle-earth-lsdb
+git pull                        # only if this repo changed
+./init.sh                       # only if init.sh changed
+podman compose down
+podman compose up -d --build
+```
+
+**The `down` is not optional.** `podman compose up -d --build` builds a new
+image, but leaves an existing container running on the old one: the change
+is built and never served. `down` removes the containers so that `up`
+creates them from the new images. Both sites are unavailable for the few
+seconds in between.
+
+To confirm the running container has the change, look inside it, not at the
+checkout:
+
+```bash
+podman exec lsdb-app cat /srv/data.lsdb.io/VERSION
+podman exec lsdb-app grep -n 'Alias /hats' /usr/local/apache2/conf/extra/httpd-custom.conf
+```
+
 ## Two sites, one container
 
 The VM's reverse proxy sends everything to port 8080, so Apache tells the
@@ -124,6 +153,19 @@ through** (`data.lsdb.io`, `lsdb.io`, `www.lsdb.io`); if it rewrites it,
 every request gets the default site, data.lsdb.io. The default also answers
 for the VM's own name and for `localhost`, which is why the checks above
 need `-H 'Host: lsdb.io'` to reach the other one.
+
+The lsdb.io site also answers to `lsdb-alt.astro.washington.edu`, a second
+name for the VM, so it can be tested through the proxy before `lsdb.io`
+itself is pointed here:
+
+```bash
+curl -s https://lsdb-alt.astro.washington.edu/ | wc -c
+```
+
+Both sites have the title "LSDB", so compare sizes: the lsdb.io landing page
+is about 12 KB and the data.lsdb.io front page about 4 KB. Getting the 4 KB
+page here means the proxy is rewriting `Host` (or the container predates
+this alias and needs a redeploy).
 
 To add a third site, add a fetch step and a `COPY` in the `Dockerfile` and a
 `<VirtualHost>` in `apache/httpd.conf`. A second repo on this VM would
@@ -156,13 +198,13 @@ hats/catalogs/
 ```
 
 A catalog is public if and only if it has a link in `published/`, and the
-link's name is its public name. `scripts/publish_catalogs.sh` creates the
-links from the list at its top; run it on a machine that mounts shire (not
-the VM).
+link's name is its public name. The links are made by hand on a machine
+that mounts shire, not on the VM.
 
-- **Publishing a catalog:** put it in `hats/catalogs`, add a line to the list
-  in `scripts/publish_catalogs.sh`, and run it. It is served at once; nothing
-  is restarted. To give it a description in the listing, add an
+- **Publishing a catalog:** put it in `hats/catalogs` and link it from
+  `published/`, for example
+  `cd hats/catalogs/published && ln -s ../erosita_dr1_erass1 erosita`.
+  It is served at once; nothing is restarted. To give it a description in the listing, add an
   `AddDescription` line to `apache/httpd.conf` and rebuild.
 - **Unpublishing:** remove its link from `published/`.
 - **Links must be relative and stay inside `hats/catalogs`.** The VM mounts
