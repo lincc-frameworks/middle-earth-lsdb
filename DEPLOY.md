@@ -2,17 +2,22 @@
 
 Target: stock Rocky 10 VM on UW DiRAC infrastructure.
 
-One container serves two sites: **data.lsdb.io** (the catalog browser and the
-HATS catalogs under `/hats/`) and **lsdb.io** (the project's landing page).
-The VM provides a reverse proxy that handles TLS termination and routes
-traffic for both names to the container on port 8080.
+One Apache container serves two sites: **data.lsdb.io** (the catalog browser
+and the HATS catalogs under `/hats/`) and **lsdb.io** (the project's landing
+page). A small router container in front of it lets a new version be
+deployed without dropping a request. The VM provides a reverse proxy that
+handles TLS termination and routes traffic for both names to the router on
+port 8080.
 
 ```bash
 git clone <this repo> /root/middle-earth-lsdb
 cd /root/middle-earth-lsdb
 sudo ./init.sh
-podman compose up -d --build
+./deploy.sh
 ```
+
+From then on the VM deploys by itself: a timer checks every minute
+whether a site's `production` branch has moved (see "Updating the websites").
 
 Then verify:
 
@@ -42,25 +47,38 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
 | File | Role |
 |---|---|
 | `/root/VM.set` (not in the repo) | Written by IT when the VM is provisioned. The source of truth for the service account name, uid, and gid. |
-| `init.sh` | Host-level only: reads the service account from `/root/VM.set` and checks it exists on the VM, installs podman + podman-compose, enables `podman-restart.service`, checks the catalog storage is mounted and readable, writes `.env`. Idempotent; safe to re-run. |
+| `init.sh` | Host-level only: reads the service account from `/root/VM.set` and checks it exists on the VM, installs podman + podman-compose, enables `podman-restart.service`, checks the catalog storage is mounted and readable, writes `.env`, installs and enables the `lsdb-deploy` timer. Idempotent; safe to re-run. |
+| `deploy.sh` | The blue/green deploy: builds a new app image, starts it beside the live container, checks it, switches the router to it, and retires the old container once its downloads are done. `--if-changed` deploys only when a site's `production` branch has moved; `--status` says what is live. |
+| `deploy/` | The systemd service and timer that run `deploy.sh --if-changed` every minute. Installed by `init.sh`. |
 | `Dockerfile` | Two stages. The first downloads the `production` branch of [astronomy-commons/data.lsdb.io](https://github.com/astronomy-commons/data.lsdb.io) and [astronomy-commons/lsdb.io](https://github.com/astronomy-commons/lsdb.io), and builds the former with Node (`npm ci && npm run build`); the latter is plain files. The second is Apache httpd 2.4 with the results in `/srv/data.lsdb.io` and `/srv/lsdb.io`. |
-| `compose.yaml` | Two services: `app` (Apache on port 8080, with the catalogs bind-mounted read-only) and `monitoring` (the VM's CPU, memory and disks on port 9110). |
+| `router/` | The router image: Apache as a reverse proxy, forwarding everything on port 8080 to whichever app container is live. |
+| `compose.yaml` | Four services: `router` (port 8080), `app-blue` and `app-green` (the same Apache image with the catalogs bind-mounted read-only; one is live at a time), and `monitoring` (the VM's CPU, memory and disks on port 9110). Driven by `deploy.sh`, not by `podman compose up`. |
 | `apache/httpd.conf` | Two Apache virtual hosts on plain HTTP port 8080, chosen by `Host` header. `data.lsdb.io` (the default): the website, and the public catalogs from `/srv/hats/published` as `/hats/` with directory listings. `lsdb.io`: the landing page. |
 | `monitoring/` | Service VM monitor, copied unchanged from [middle-earth-gadget-monitor](https://github.com/dirac-institute/middle-earth-gadget-monitor). Its image and compose settings (`monitoring/compose.yaml`, pulled into `compose.yaml` with `extends`). See `monitoring/README.md`. |
-| `dev-startup.sh` | Local development helper for macOS: runs `docker compose` as your own uid/gid with an empty local catalog directory, since a laptop has neither `VM.set` nor the storage. |
+| `dev-startup.sh` | Local development helper for macOS: runs `deploy.sh` with docker as your own uid/gid with an empty local catalog directory, since a laptop has neither `VM.set` nor the storage. |
+| `tests/zero-downtime.sh` | Deploys a second time during a slow download and continuous requests, and fails if anything was dropped. Run by CI. |
 | `SECRETS.md` | Why the service has no secrets, the NFS ownership model, and what to do if it ever gets one. |
 
 ## Architecture
 
 ```
                    ┌──────────────────────────────────────────┐
-  VM reverse  ──►  │  app container: apache (port 8080)        │
-  proxy :8080      │    Host: data.lsdb.io                     │
+  VM reverse  ──►  │  router container: apache (port 8080)     │
+  proxy :8080      │    forwards everything, Host header and   │
+                   │    all, to the live app container         │
+                   └───────────────┬──────────────────────────┘
+                                   │ compose network
+                   ┌───────────────▼──────────────────────────┐
+                   │  app container, "blue" or "green": apache │
+                   │    Host: data.lsdb.io                     │
                    │      /        → website (in the image)    │
                    │      /hats/*  → /srv/hats/published ──────┼──► /service/hats-catalogs
                    │    Host: lsdb.io                          │     (NFS, on the VM)
                    │      /        → website (in the image)    │
                    └──────────────────────────────────────────┘
+                     (during a deploy both colours run: the new
+                      one takes new requests, the old one
+                      finishes its downloads and exits)
 
   gadget monitor   ┌──────────────────────────────────────────┐
   (polls every ──► │  monitoring container (port 9110)         │
@@ -72,84 +90,123 @@ Then register the VM with the gadget monitor; see "Monitoring" below.
 
 ## Updating the websites
 
-The sites' source is not in this repo. Every build downloads the current tip
-of the `production` branch of each site's repo, named in the `Dockerfile`:
+The sites' source is not in this repo. A deploy builds the commit that the
+`production` branch of each site's repo points at:
 
 | Site | Source | Branch set by |
 |---|---|---|
-| data.lsdb.io | `astronomy-commons/data.lsdb.io`, `production` | `DATA_SITE_REF` |
-| lsdb.io | `astronomy-commons/lsdb.io`, `production` | `MAIN_SITE_REF` |
+| data.lsdb.io | `astronomy-commons/data.lsdb.io`, `production` | `DATA_SITE_BRANCH` in `deploy.sh` |
+| lsdb.io | `astronomy-commons/lsdb.io`, `production` | `MAIN_SITE_BRANCH` in `deploy.sh` |
 
-Development happens on each site's `main`; `production` is what is live. So
-releasing a change to a site needs no commit here:
+Development happens on each site's `main`; `production` is what is live.
+**Merging to `production` deploys.** Releasing a change to a site is one
+step: in the site's repo, merge `main` into `production` (a pull request
+from `main` to `production`). Within a few minutes the VM notices, builds, and
+switches to the new version, with no downtime. So merge there only what is
+ready to go live.
 
-1. In the site's repo, merge `main` into `production` (a pull request from
-   `main` to `production`).
-2. On the VM, redeploy (see "Redeploying" below):
-
-   ```bash
-   cd /root/middle-earth-lsdb
-   podman compose down
-   podman compose up -d --build
-   ```
-
-Then check `/VERSION` on that site (the checks at the top): it prints the
-commit that was built, which should be the tip of the branch. A site whose
-branch has not moved is not rebuilt. If `/VERSION` still shows the old commit
-after a `down` and `up`, the build reused a cached download; force a fresh
-one:
+To see what happened, on the VM:
 
 ```bash
-podman compose down
-podman compose build --no-cache app && podman compose up -d
+./deploy.sh --status                  # which colour is live, and at which commits
+journalctl -u lsdb-deploy -n 50       # the timer's deploys, and any failures
+systemctl list-timers lsdb-deploy.timer
 ```
 
-For data.lsdb.io this replaces the legacy `npm run build` + `rsync` to epyc +
-`scripts/post-deploy.sh`.
+`/VERSION` on each site also prints the commit that is live.
 
-**Merging to `production` does not deploy by itself.** Nothing changes on the
-VM until someone rebuilds there. And any rebuild, for whatever reason, picks
-up whatever is on the `production` branches at that moment, so merge there
-only what is ready to go live.
+**If a build fails**, nothing changes: the live container is not touched
+until a new one has built, started and passed its checks. The failure is in
+the journal, and the timer tries again on its next run.
 
 **To go back to an earlier version**, revert the change on the site's
-`production` branch and rebuild. To hold a site at one version meanwhile, set its `*_SITE_REF` in the
-`Dockerfile` to a tag or a full commit id; set it back to the branch
-afterwards. This repo no longer records what is deployed: `/VERSION` on the
-running site is the only place that says.
+`production` branch; the revert deploys like any other change. To hold a
+site at one version meanwhile, set its `*_SITE_BRANCH` in `deploy.sh` to a
+tag or a full commit id; set it back to the branch afterwards.
 
-## Redeploying
+**To stop automatic deploys**: `systemctl disable --now lsdb-deploy.timer`.
+`./deploy.sh` still deploys by hand.
 
-After the first deployment, every change goes out the same way, whether it
-is a change to this repo or a new version of a site:
+## Deploying by hand
+
+A change to this repo (the Apache configuration, the `Dockerfile`) is not
+picked up by the timer, which only watches the sites. Deploy it yourself:
 
 ```bash
 cd /root/middle-earth-lsdb
-git pull                        # only if this repo changed
-./init.sh                       # only if init.sh changed
-podman compose down
-podman compose up -d --build
+git pull
+./init.sh                       # only if init.sh or deploy/ changed
+./deploy.sh
 ```
 
-**The `down` is not optional.** `podman compose up -d --build` builds a new
-image, but leaves an existing container running on the old one: the change
-is built and never served. `down` removes the containers so that `up`
-creates them from the new images. Both sites are unavailable for the few
-seconds in between.
-
-To confirm the running container has the change, look inside it, not at the
-checkout:
+This is the same no-downtime deploy the timer does. To confirm the live
+container has the change, look inside it, not at the checkout:
 
 ```bash
-podman exec lsdb-app cat /srv/data.lsdb.io/VERSION
-podman exec lsdb-app grep -n 'Alias /hats' /usr/local/apache2/conf/extra/httpd-custom.conf
+live=$(./deploy.sh --status | sed -n 's/^live: \([a-z]*\).*/\1/p')
+podman exec lsdb-app-$live grep -n 'Alias /hats' /usr/local/apache2/conf/extra/httpd-custom.conf
 ```
+
+**Do not use `podman compose up` or `down` to deploy.** `up` would start
+both colours at once and leave the router pointing where it was; `down`
+stops everything, router included. `podman compose down` is still how to
+stop the whole service on purpose; `./deploy.sh` brings it back.
+
+**A change under `router/` is the exception.** The router is the one
+container that cannot be replaced without a gap, because it is what holds
+port 8080. `./deploy.sh --router` rebuilds and restarts it as part of a
+deploy; the sites are unavailable for a few seconds and downloads in
+progress are cut off. The router's configuration is a dozen lines and
+should rarely change.
+
+## Moving a VM from the single-container setup
+
+Before the router there was one container, `lsdb-app`, on port 8080. The
+first `./deploy.sh` on such a VM builds and checks the new app container
+while `lsdb-app` keeps serving, then removes `lsdb-app` and starts the
+router in its place. That one changeover has a gap of a few seconds; every
+deploy after it has none.
+
+```bash
+cd /root/middle-earth-lsdb
+git pull
+sudo ./init.sh      # installs the timer; its first run is two minutes later
+./deploy.sh
+```
+
+## How a deploy works
+
+There are two app containers, `lsdb-app-blue` and `lsdb-app-green`, built
+from the same `Dockerfile`. One is live; the other normally does not exist.
+`deploy.sh`:
+
+1. asks GitHub which commit each site's `production` branch points at;
+2. builds the image for the idle colour from exactly those commits, while
+   the live container keeps serving;
+3. starts it, and checks it directly on its own port (8081 for blue, 8082
+   for green): both sites answer, at the expected commits, and `/hats/`
+   lists the catalogs;
+4. rewrites the router's `backend.conf` to name the new container and sends
+   the router a graceful reload (`SIGUSR1`). Requests already in progress
+   finish against the old container; new ones go to the new one;
+5. checks the sites again, this time through the router, and switches back
+   if they do not answer;
+6. stops the old container gracefully. Apache finishes the requests it has
+   and exits; if a download is still going after an hour
+   (`DRAIN_SECONDS`), it is cut off. The container is then removed.
+
+Which colour is live is recorded in one place, the router's `backend.conf`,
+kept in the `router-state` volume so it survives a restart of the router.
+
+CI runs this for real on every pull request: `tests/zero-downtime.sh`
+deploys during a slow 300 MB download and a stream of requests to both
+sites, and fails if any request is not a 200 or the download is short.
 
 ## Two sites, one container
 
-The VM's reverse proxy sends everything to port 8080, so Apache tells the
-sites apart by the `Host` header. **The proxy must pass the original `Host`
-through** (`data.lsdb.io`, `lsdb.io`, `www.lsdb.io`); if it rewrites it,
+The VM's reverse proxy sends everything to port 8080, and the router passes
+it on unchanged, so Apache tells the sites apart by the `Host` header. **The
+proxy must pass the original `Host` through** (`data.lsdb.io`, `lsdb.io`, `www.lsdb.io`); if it rewrites it,
 every request gets the default site, data.lsdb.io. The default also answers
 for the VM's own name and for `localhost`, which is why the checks above
 need `-H 'Host: lsdb.io'` to reach the other one.
@@ -232,21 +289,35 @@ else is in the directory. But the links are the whole access list, so:
 
 ## Design choices
 
-**One container, one process.** Both sites are static files, so the container
-runs Apache and nothing else. There is no application process to
+**One container, one process.** Both sites are static files, so the app
+container runs Apache and nothing else. There is no application process to
 reverse-proxy to and no `start.sh`.
+
+**Blue/green behind our own router, not the VM's proxy.** A container cannot
+be replaced in place without a gap: the old one has to let go of port 8080
+before the new one can take it, and a catalog download in progress is cut
+off. So two app containers take turns, and a router container that never
+needs to change holds the port. The switch could have been done in the VM's
+reverse proxy instead, but that is IT's standard configuration, not this
+repo's. The same images would run unchanged somewhere that brings its own
+load balancer, with the router dropped.
 
 **The sites are built inside the image.** Nobody builds on a laptop and copies
 files to the server. What is deployed is exactly one commit of each site,
 the tip of its `production` branch when the image was built, visible at
 `/VERSION`.
 
-**Containers for everything.** The only things `init.sh` does on the host are
-check the service account, install podman, and check the storage mount. The
+**Containers for everything but the deploy itself.** The only things
+`init.sh` does on the host are check the service account, install podman,
+check the storage mount, and install the timer that runs `deploy.sh`. That
+script has to live on the host, since it is what builds and replaces the
+containers. The
 service account, SSH, SELinux and the NFS mount are provisioned by IT.
 
-**Nothing is written.** The container keeps no state. Apache's access and
-error logs go to the container's stdout/stderr: `podman logs lsdb-app`.
+**Almost nothing is written.** The app containers keep no state. The only
+state is which colour is live: one small file in the router's `router-state`
+volume. Apache's access and error logs go to each container's stdout/stderr:
+`podman logs lsdb-router`, `podman logs lsdb-app-blue` (or `-green`).
 
 **Service account with fixed uid/gid.** The service account name, uid, and gid
 come from IT's `/root/VM.set` on the VM, and flow through `.env` into the
@@ -254,9 +325,10 @@ Dockerfile and compose.yaml with no fallback defaults. Nothing about the
 account is committed to the repo. Apache runs as that uid, which is the one
 that can read the catalogs on the NFS share (`root_squash`; see `SECRETS.md`).
 
-**Port 8080, localhost only.** The container listens on port 8080 and the
+**Port 8080, localhost only.** The router listens on port 8080 and the
 compose file binds it to `127.0.0.1:8080`, with ordinary port mapping (no
-host networking). The VM's reverse proxy handles TLS termination and routes
+host networking). The app containers are also bound to localhost, on 8081
+and 8082, only so that `deploy.sh` can check a new one before it is live. The VM's reverse proxy handles TLS termination and routes
 external traffic to this port. The one exception is the monitoring
 container's port 9110 (see "Monitoring").
 
@@ -409,5 +481,8 @@ entry. Otherwise the dashboard shows it as down.
 ## Boot persistence
 
 `restart: unless-stopped` only survives reboot if `podman-restart.service` is
-enabled, which `init.sh` does. The NFS mount must also come back at boot;
+enabled, which `init.sh` does. The router and the live app container come
+back as they were, and the router still points at the same colour. The
+`lsdb-deploy` timer is enabled too, so a reboot also resumes automatic
+deploys. The NFS mount must also come back at boot;
 that is IT's `/etc/fstab` entry, not something this repo manages.

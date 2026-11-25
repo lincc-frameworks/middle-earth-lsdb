@@ -1,19 +1,48 @@
 # The LSDB websites: data.lsdb.io and lsdb.io.
 #
-#   podman compose up -d --build
+#   ./deploy.sh          (not `podman compose up`; see DEPLOY.md)
 #
-# Apache serves both websites (built into the image) and, on data.lsdb.io,
-# the HATS catalogs under /hats/ (bind-mounted read-only from network
-# storage), in one container on port 8080. The VM's reverse proxy handles TLS termination and
-# routes traffic here. A second container, `monitoring`, reports the VM's
-# CPU, memory and disks on port 9110 for the gadget monitor.
+# Three kinds of container:
+#
+#   router      Apache as a reverse proxy on port 8080, where the VM's own
+#               reverse proxy (which handles TLS) sends everything. It passes
+#               each request to whichever app container is live.
+#   app-blue,   Apache serving both websites (built into the image) and, on
+#   app-green   data.lsdb.io, the HATS catalogs under /hats/ (bind-mounted
+#               read-only from network storage). Only one is live at a time.
+#               deploy.sh builds a new release into the idle one, switches the
+#               router to it, and lets the old one finish its downloads.
+#   monitoring  the VM's CPU, memory and disks on port 9110 for the gadget
+#               monitor.
 #
 # SVC_USER, SVC_UID, SVC_GID, SVC_FQDN and HATS_DIR must be set in .env
 # (written by init.sh; the account comes from IT's /root/VM.set). There are no
 # defaults; missing values will cause podman compose to fail.
 
 services:
-  app:
+  router:
+    build:
+      context: router
+      args:
+        SVC_UID: "${SVC_UID}"
+        SVC_GID: "${SVC_GID}"
+        SVC_USER: "${SVC_USER}"
+    image: middle-earth-lsdb/router:latest
+    container_name: lsdb-router
+    hostname: "${SVC_FQDN}"
+    environment:
+      SERVER_NAME: "${SVC_FQDN}"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Which app container is live (backend.conf, written by deploy.sh).
+      - "router-state:/usr/local/apache2/conf/state"
+    restart: unless-stopped
+    user: "${SVC_UID}:${SVC_GID}"
+    labels:
+      idac.service: lsdb-router
+
+  app-blue: &app
     build:
       context: .
       dockerfile: Dockerfile
@@ -21,13 +50,20 @@ services:
         SVC_UID: "${SVC_UID}"
         SVC_GID: "${SVC_GID}"
         SVC_USER: "${SVC_USER}"
-    image: middle-earth-lsdb/app:latest
-    container_name: lsdb-app
+        # Which commit of each website to build. deploy.sh sets these to the
+        # commits the `production` branches point at.
+        DATA_SITE_REF: "${DATA_SITE_REF:-production}"
+        MAIN_SITE_REF: "${MAIN_SITE_REF:-production}"
+    image: middle-earth-lsdb/app:blue
+    container_name: lsdb-app-blue
     hostname: "${SVC_FQDN}"
     environment:
       SERVER_NAME: "${SVC_FQDN}"
     ports:
-      - "127.0.0.1:8080:8080"
+      # Not used by the router (it reaches the container over the compose
+      # network); this is for deploy.sh to check a new container directly
+      # before any traffic is sent to it.
+      - "127.0.0.1:8081:8080"
     volumes:
       # The HATS catalog directory. Apache serves only its published/
       # subdirectory, as /hats/; the rest is mounted because the links in
@@ -38,6 +74,13 @@ services:
     user: "${SVC_UID}:${SVC_GID}"
     labels:
       idac.service: lsdb-app
+
+  app-green:
+    <<: *app
+    image: middle-earth-lsdb/app:green
+    container_name: lsdb-app-green
+    ports:
+      - "127.0.0.1:8082:8080"
 
   # CPU, memory and disks of this VM, for the gadget monitor (monitoring/README.md).
   # Copied unchanged from middle-earth-gadget-monitor; its settings live in
@@ -50,3 +93,6 @@ services:
     container_name: lsdb-service-vm
     labels:
       idac.service: lsdb-service-vm
+
+volumes:
+  router-state:

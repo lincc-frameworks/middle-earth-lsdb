@@ -11,11 +11,10 @@
 # ── Stage 1: fetch and build the sites ──────────────────────────────────────
 FROM docker.io/library/node:22-bookworm-slim AS sites
 
-# What to deploy: the `production` branch of each site's repo. Every build
-# downloads the branch as it is at that moment, so releasing a site is merging
-# its `main` into `production` and rebuilding on the VM (DEPLOY.md, "Updating
-# the websites"). A tag or a full commit id also works here, to hold a site at
-# one version.
+# What to build: a branch, a tag or a full commit id of each site's repo.
+# deploy.sh passes the commits that the `production` branches point at, so
+# an image is always exactly one commit of each site (DEPLOY.md, "Updating
+# the websites"). The defaults only apply to a build run by hand.
 #   https://github.com/astronomy-commons/data.lsdb.io
 ARG DATA_SITE_REF=production
 #   https://github.com/astronomy-commons/lsdb.io

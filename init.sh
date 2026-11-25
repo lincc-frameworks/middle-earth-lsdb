@@ -3,12 +3,12 @@
 #
 #   git clone <this repo> && cd middle-earth-lsdb
 #   sudo ./init.sh
-#   podman compose up -d --build
+#   ./deploy.sh
 #
 # Only host-level concerns live here (checking the service account from IT's
-# /root/VM.set, podman packages, the catalog storage mount, .env). Everything
-# else belongs in the
-# container image. The service account, SSH, and SELinux are provisioned by
+# /root/VM.set, podman packages, the catalog storage mount, .env, and the
+# timer that runs deploy.sh). Everything else belongs in the container
+# images. The service account, SSH, and SELinux are provisioned by
 # IT; this script does not change them.
 
 set -euo pipefail
@@ -75,11 +75,15 @@ echo "== Packages =="
 need=()
 command -v podman >/dev/null || need+=(podman)
 command -v podman-compose >/dev/null || need+=(podman-compose)
+# deploy.sh asks GitHub for the sites' commits with git, and checks a new
+# container with curl.
+command -v git  >/dev/null || need+=(git)
+command -v curl >/dev/null || need+=(curl)
 if [ ${#need[@]} -gt 0 ]; then
     rpm -q epel-release >/dev/null 2>&1 || dnf install -y epel-release
     dnf install -y "${need[@]}"
 else
-    echo "podman and podman-compose already installed"
+    echo "podman, podman-compose, git and curl already installed"
 fi
 podman --version
 
@@ -139,10 +143,25 @@ echo "  ok   SVC_USER=$SVC_USER SVC_UID=$SVC_UID SVC_GID=$SVC_GID written to $EN
 echo "  ok   SVC_FQDN=$FQDN written to $ENV_FILE"
 echo "  ok   HATS_DIR=$HATS_DIR written to $ENV_FILE"
 
+# ── Automatic deploys ──────────────────────────────────────────────────────
+echo
+echo "== Automatic deploys =="
+# A systemd timer runs `deploy.sh --if-changed` every minute, which
+# deploys when a website's `production` branch has moved and otherwise does
+# nothing. Its first run, a couple of minutes from now, is also what deploys
+# on a new VM if nobody runs ./deploy.sh first.
+for unit in lsdb-deploy.service lsdb-deploy.timer; do
+    sed "s|@REPO_DIR@|$REPO_DIR|g" "$REPO_DIR/deploy/$unit" > "/etc/systemd/system/$unit"
+done
+systemctl daemon-reload
+systemctl enable --now lsdb-deploy.timer >/dev/null 2>&1 \
+    && echo "  ok   lsdb-deploy.timer enabled (journalctl -u lsdb-deploy)" \
+    || warn "could not enable lsdb-deploy.timer; deploys will not be automatic"
+
 echo
 if [ "$WARNINGS" -gt 0 ]; then
     echo "init complete with $WARNINGS warning(s)."
 else
     echo "init complete."
 fi
-echo "Next: podman compose up -d --build"
+echo "Next: ./deploy.sh"

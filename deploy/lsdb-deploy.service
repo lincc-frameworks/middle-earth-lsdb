@@ -1,0 +1,27 @@
+# Installed by init.sh as /etc/systemd/system/lsdb-deploy.service, with
+# @REPO_DIR@ replaced by where this repo is checked out.
+#
+#   journalctl -u lsdb-deploy        what it has done
+#   systemctl start lsdb-deploy      check right now
+
+[Unit]
+Description=Deploy the LSDB websites if a production branch has moved
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_DIR@
+Environment=HOME=/root
+# Through bash: on an SELinux-enforcing VM systemd may not execute a script
+# that lives under /root directly.
+ExecStart=/bin/bash @REPO_DIR@/deploy.sh --if-changed
+# A deploy includes an image build.
+TimeoutStartSec=30min
+# Keep the journal to real deploys. deploy.sh prints nothing when there is
+# nothing new, but systemd itself logs "Starting" and "Finished" at info
+# level for every run, once a minute. So: log the script's output one level
+# up, at notice, and drop anything below that for this unit. systemd's own
+# failure messages are warnings or errors and are kept.
+SyslogLevel=notice
+LogLevelMax=notice

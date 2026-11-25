@@ -20,8 +20,10 @@ export SVC_GID="$(id -g)"
 export SVC_FQDN=localhost
 export HATS_DIR="$PWD/dev-hats"
 
-docker compose up -d --build
+# The same blue/green deploy as on the VM, with docker. Run it again to
+# deploy a second time and watch the colours swap.
+CONTAINER_ENGINE=docker ./deploy.sh "$@"
 echo
 echo "data.lsdb.io at http://localhost:8080/"
 echo "lsdb.io at      http://lsdb.localhost:8080/  (or: curl -H 'Host: lsdb.io' http://localhost:8080/)"
-echo "Stop with: docker compose down"
+echo "Stop with: docker compose down  (in a shell with the SVC_* variables above set)"

@@ -1,0 +1,18 @@
+# Installed by init.sh as /etc/systemd/system/lsdb-deploy.timer.
+#
+#   systemctl list-timers lsdb-deploy.timer    when it last ran and runs next
+#   systemctl disable --now lsdb-deploy.timer  stop deploying automatically
+
+[Unit]
+Description=Check every minute for new versions of the LSDB websites
+
+[Timer]
+OnActiveSec=2min
+# A minute after the last check finished, so a deploy in progress is never
+# overlapped. A check that finds nothing new is two small requests to GitHub.
+OnUnitInactiveSec=1min
+# The default accuracy is a minute, which would stretch this to two.
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

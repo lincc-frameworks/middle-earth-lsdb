@@ -1,4 +1,6 @@
-# Builds both images and checks that the containers start and serve.
+# Builds the images, deploys them the way the VM does (deploy.sh, with docker
+# in place of podman), checks that both sites serve, then deploys a second
+# time to check that the blue/green switch drops no request or download.
 #
 # The app image downloads and builds the `production` branch of each website
 # (see Dockerfile), so this also fails if one of those no longer builds.
@@ -26,17 +28,20 @@ jobs:
 
       - name: Shell scripts parse
         run: |
-          for f in init.sh dev-startup.sh; do bash -n "$f"; done
+          for f in init.sh deploy.sh dev-startup.sh tests/*.sh; do bash -n "$f"; done
 
-      - name: Build and start the containers
+      - name: Build and deploy
         run: |
           # An empty stand-in for the catalog storage, so /hats/ has something
           # to list. dev-startup.sh runs the containers as the runner's user.
           mkdir -p dev-hats/published
           ./dev-startup.sh
 
-      - name: Apache configuration is valid
-        run: docker exec lsdb-app httpd -t
+      - name: Apache configurations are valid
+        run: |
+          live=$(CONTAINER_ENGINE=docker ./deploy.sh --status | sed -n 's/^live: \([a-z]*\).*/\1/p')
+          docker exec "lsdb-app-$live" httpd -t
+          docker exec lsdb-router httpd -t
 
       - name: Smoke test
         run: |
@@ -59,10 +64,10 @@ jobs:
           [[ "$main" =~ ^[0-9a-f]{40}$ ]] || fail "lsdb.io /VERSION is not a commit id"
 
           # The two virtual hosts serve different front pages.
-          get -o data.html http://localhost:8080/
-          get -o main.html -H 'Host: lsdb.io' http://localhost:8080/
-          [ -s data.html ] && [ -s main.html ] || fail "a front page is empty"
-          cmp -s data.html main.html && fail "both host names serve the same page"
+          get -o /tmp/data.html http://localhost:8080/
+          get -o /tmp/main.html -H 'Host: lsdb.io' http://localhost:8080/
+          [ -s /tmp/data.html ] && [ -s /tmp/main.html ] || fail "a front page is empty"
+          cmp -s /tmp/data.html /tmp/main.html && fail "both host names serve the same page"
 
           code() { get -o /dev/null -w '%{http_code}' "$@"; }
           [ "$(code http://localhost:8080/hats/)" = 200 ] || fail "/hats/ is not 200"
@@ -78,9 +83,15 @@ jobs:
           done
           echo "all checks passed"
 
+      - name: Deploy again with no downtime
+        run: tests/zero-downtime.sh
+
       - name: Container logs
         if: always()
         run: |
           docker ps -a
-          docker logs lsdb-app 2>&1 | tail -n 100 || true
-          docker logs lsdb-service-vm 2>&1 | tail -n 50 || true
+          for c in lsdb-router lsdb-app-blue lsdb-app-green lsdb-service-vm; do
+            echo "::group::$c"
+            docker logs "$c" 2>&1 | grep -v ' "GET / HTTP/1.1" 200 ' | tail -n 60 || true
+            echo "::endgroup::"
+          done

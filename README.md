@@ -4,7 +4,8 @@ Containerized deployment of the LSDB websites for UW DiRAC VM infrastructure,
 following
 [middle-earth-service-example](https://github.com/dirac-institute/middle-earth-service-example).
 
-One Apache container serves:
+One Apache container (behind a small router container, so that deploys drop
+no requests) serves:
 
 - **[data.lsdb.io](https://data.lsdb.io)**: the catalog browser, built from the
   `production` branch of
@@ -22,11 +23,15 @@ monitor.
 git clone <this repo>
 cd middle-earth-lsdb
 sudo ./init.sh
-podman compose up -d --build
+./deploy.sh
 ```
 
+After that the VM deploys by itself: merging to a site's `production` branch
+goes live within a few minutes, with no downtime.
+
 - **`DEPLOY.md`**: deploying, verifying, updating the websites, how the
-  catalogs are served, and the design choices.
+  blue/green deploy works, how the catalogs are served, and the design
+  choices.
 - **`SECRETS.md`**: why there are none, and the NFS ownership model.
 - **`monitoring/README.md`**: the service VM monitor.
 
