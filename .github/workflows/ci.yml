@@ -1,0 +1,81 @@
+# Builds both images and checks that the containers start and serve.
+#
+# The app image downloads and builds the `production` branch of each website
+# (see Dockerfile), so this also fails if one of those no longer builds.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell scripts parse
+        run: |
+          for f in init.sh dev-startup.sh; do bash -n "$f"; done
+
+      - name: Build and start the containers
+        run: |
+          # An empty stand-in for the catalog storage, so /hats/ has something
+          # to list. dev-startup.sh runs the containers as the runner's user.
+          mkdir -p dev-hats/published
+          ./dev-startup.sh
+
+      - name: Apache configuration is valid
+        run: docker exec lsdb-app httpd -t
+
+      - name: Smoke test
+        run: |
+          get() { curl -sS --max-time 10 "$@"; }
+          fail() { echo "FAIL: $*" >&2; exit 1; }
+
+          # Wait for Apache.
+          for i in $(seq 1 30); do
+            get -o /dev/null http://localhost:8080/ && break
+            [ "$i" -lt 30 ] || fail "nothing answering on port 8080"
+            sleep 1
+          done
+
+          # Each site reports the commit it was built from.
+          data=$(get http://localhost:8080/VERSION)
+          main=$(get -H 'Host: lsdb.io' http://localhost:8080/VERSION)
+          echo "data.lsdb.io at $data"
+          echo "lsdb.io      at $main"
+          [[ "$data" =~ ^[0-9a-f]{40}$ ]] || fail "data.lsdb.io /VERSION is not a commit id"
+          [[ "$main" =~ ^[0-9a-f]{40}$ ]] || fail "lsdb.io /VERSION is not a commit id"
+
+          # The two virtual hosts serve different front pages.
+          get -o data.html http://localhost:8080/
+          get -o main.html -H 'Host: lsdb.io' http://localhost:8080/
+          [ -s data.html ] && [ -s main.html ] || fail "a front page is empty"
+          cmp -s data.html main.html && fail "both host names serve the same page"
+
+          code() { get -o /dev/null -w '%{http_code}' "$@"; }
+          [ "$(code http://localhost:8080/hats/)" = 200 ] || fail "/hats/ is not 200"
+          [ "$(code http://localhost:8080/no-such-page)" = 404 ] || fail "unknown path is not 404"
+          [ "$(code -H 'Host: lsdb.io' http://localhost:8080/hats/)" = 404 ] || fail "lsdb.io serves /hats/"
+
+          # The service VM monitor.
+          get http://localhost:9110/metrics | grep -q '^service_vm_load1 ' || fail "no metrics on port 9110"
+          echo "all checks passed"
+
+      - name: Container logs
+        if: always()
+        run: |
+          docker ps -a
+          docker logs lsdb-app 2>&1 | tail -n 100 || true
+          docker logs lsdb-service-vm 2>&1 | tail -n 50 || true
