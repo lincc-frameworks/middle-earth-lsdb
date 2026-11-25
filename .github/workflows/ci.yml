@@ -69,8 +69,13 @@ jobs:
           [ "$(code http://localhost:8080/no-such-page)" = 404 ] || fail "unknown path is not 404"
           [ "$(code -H 'Host: lsdb.io' http://localhost:8080/hats/)" = 404 ] || fail "lsdb.io serves /hats/"
 
-          # The service VM monitor.
-          get http://localhost:9110/metrics | grep -q '^service_vm_load1 ' || fail "no metrics on port 9110"
+          # The service VM monitor. It takes a moment longer than Apache to
+          # start listening, so give it time.
+          for i in $(seq 1 30); do
+            get http://localhost:9110/metrics 2>/dev/null | grep -q '^service_vm_load1 ' && break
+            [ "$i" -lt 30 ] || fail "no metrics on port 9110"
+            sleep 1
+          done
           echo "all checks passed"
 
       - name: Container logs
