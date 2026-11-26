@@ -43,10 +43,15 @@ STATE=/usr/local/apache2/conf/state/backend.conf
 
 log()  { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 die()  { log "FAILED: $*" >&2; exit 1; }
-compose() { "$ENGINE" compose "$@"; }
+# Every container command runs with the deploy lock (file descriptor 9, taken
+# below) closed. Otherwise the long-lived processes podman leaves behind for
+# each container inherit it and hold the lock for as long as the container
+# lives, and every later deploy finds one "already running".
+engine()  { command "$ENGINE" "$@" 9>&-; }
+compose() { engine compose "$@"; }
 port_of() { case "$1" in blue) echo 8081 ;; green) echo 8082 ;; esac; }
-running() { [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
-exists()  { "$ENGINE" inspect "$1" >/dev/null 2>&1; }
+running() { [ "$(engine inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+exists()  { engine inspect "$1" >/dev/null 2>&1; }
 
 # resolve <repo url> <ref>: print the commit id the ref points at.
 resolve() {
@@ -59,11 +64,11 @@ resolve() {
 # The colour the router sends traffic to, or nothing.
 live_colour() {
     running "$ROUTER" || return 0
-    "$ENGINE" exec "$ROUTER" sed -n 's/^# live: //p' "$STATE" 2>/dev/null || true
+    engine exec "$ROUTER" sed -n 's/^# live: //p' "$STATE" 2>/dev/null || true
 }
 
 # version_in <colour> <site dir>: the commit that container was built from.
-version_in() { "$ENGINE" exec "lsdb-app-$1" cat "/srv/$2/VERSION" 2>/dev/null || true; }
+version_in() { engine exec "lsdb-app-$1" cat "/srv/$2/VERSION" 2>/dev/null || true; }
 
 # point_router <colour>: make it the live one, without dropping connections.
 point_router() {
@@ -72,11 +77,11 @@ point_router() {
         "# Written by deploy.sh; do not edit." \
         "ProxyPass        / http://lsdb-app-$1:8080/ disablereuse=On" \
         "ProxyPassReverse / http://lsdb-app-$1:8080/" |
-        "$ENGINE" exec -i "$ROUTER" sh -c "cat > $STATE.new && mv $STATE.new $STATE" || return 1
-    "$ENGINE" exec "$ROUTER" httpd -t >/dev/null 2>&1 || return 1
+        engine exec -i "$ROUTER" sh -c "cat > $STATE.new && mv $STATE.new $STATE" || return 1
+    engine exec "$ROUTER" httpd -t >/dev/null 2>&1 || return 1
     # USR1 is Apache's graceful restart: it rereads its configuration, and
     # each worker finishes the request it is serving before it goes.
-    "$ENGINE" kill --signal USR1 "$ROUTER" >/dev/null
+    engine kill --signal USR1 "$ROUTER" >/dev/null
 }
 
 # get <port> <path> [Host]: body of the response, or nothing.
@@ -108,9 +113,9 @@ drain() {
     cmd="$ENGINE stop -t $DRAIN_SECONDS $name >/dev/null 2>&1; $ENGINE rm -f $name >/dev/null 2>&1"
     if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
         systemd-run --quiet --collect --unit "lsdb-drain-$1-$(date +%s)" \
-            --description "Drain the old LSDB app container ($1)" sh -c "$cmd" && return 0
+            --description "Drain the old LSDB app container ($1)" sh -c "$cmd" 9>&- && return 0
     fi
-    nohup sh -c "$cmd" >/dev/null 2>&1 &
+    nohup sh -c "$cmd" >/dev/null 2>&1 9>&- &
 }
 
 if_changed=0 with_router=0
@@ -131,7 +136,7 @@ done
 
 # One deploy at a time (the timer and a person can both start one).
 if command -v flock >/dev/null 2>&1; then
-    exec 9> /tmp/lsdb-deploy.lock
+    exec 9> "/tmp/lsdb-deploy-$(id -u).lock"
     if ! flock -n 9; then
         [ "$if_changed" = 1 ] && exit 0
         die "another deploy is running"
@@ -163,13 +168,13 @@ compose build "app-$new" || die "the image did not build; ${old:-nothing} is sti
 
 if exists "lsdb-app-$new"; then
     running "lsdb-app-$new" && log "lsdb-app-$new is still finishing downloads from the last deploy; stopping it"
-    "$ENGINE" rm -f "lsdb-app-$new" >/dev/null
+    engine rm -f "lsdb-app-$new" >/dev/null
 fi
 compose up -d --no-deps "app-$new" || die "lsdb-app-$new did not start; ${old:-nothing} is still live"
 
 if ! check "$port" "$data_id" "$main_id"; then
-    "$ENGINE" logs --tail 30 "lsdb-app-$new" 2>&1 || true
-    "$ENGINE" rm -f "lsdb-app-$new" >/dev/null 2>&1 || true
+    engine logs --tail 30 "lsdb-app-$new" 2>&1 || true
+    engine rm -f "lsdb-app-$new" >/dev/null 2>&1 || true
     die "the new container did not pass its checks and was removed; ${old:-nothing} is still live"
 fi
 log "lsdb-app-$new passed its checks on port $port"
@@ -178,15 +183,15 @@ log "lsdb-app-$new passed its checks on port $port"
 if [ "$with_router" = 1 ] && exists "$ROUTER"; then
     log "rebuilding the router (a few seconds of downtime)"
     compose build router || die "the router image did not build; nothing was switched"
-    "$ENGINE" rm -f "$ROUTER" >/dev/null
+    engine rm -f "$ROUTER" >/dev/null
 fi
 if ! running "$ROUTER"; then
     # The setup before the router had one container, lsdb-app, on port 8080.
     if exists lsdb-app; then
         log "removing the pre-router container lsdb-app to free port 8080"
-        "$ENGINE" rm -f lsdb-app >/dev/null
+        engine rm -f lsdb-app >/dev/null
     fi
-    exists "$ROUTER" && "$ENGINE" rm -f "$ROUTER" >/dev/null
+    exists "$ROUTER" && engine rm -f "$ROUTER" >/dev/null
     compose up -d --no-deps router || die "the router did not start"
     for i in $(seq 1 30); do running "$ROUTER" && break; sleep 1; done
 fi
@@ -198,7 +203,7 @@ point_router "$new" || die "could not point the router at $new"
 if ! check 8080 "$data_id" "$main_id"; then
     if [ -n "$old" ]; then
         point_router "$old" || true
-        "$ENGINE" rm -f "lsdb-app-$new" >/dev/null 2>&1 || true
+        engine rm -f "lsdb-app-$new" >/dev/null 2>&1 || true
         die "the sites did not answer through the router after the switch; switched back to $old"
     fi
     die "the sites do not answer through the router"
@@ -210,5 +215,5 @@ if [ -n "$old" ]; then
     log "lsdb-app-$old will stop when its downloads finish (at most $((DRAIN_SECONDS / 60)) minutes)"
     drain "$old"
 elif [ -n "${stale:-}" ] && exists "lsdb-app-$stale"; then
-    "$ENGINE" rm -f "lsdb-app-$stale" >/dev/null 2>&1 || true
+    engine rm -f "lsdb-app-$stale" >/dev/null 2>&1 || true
 fi
